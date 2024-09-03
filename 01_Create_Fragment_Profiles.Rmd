@@ -1,0 +1,410 @@
+---
+title: "01_Create_Fragmentation_Profiles"
+author: "Alice McAtamney"
+date: "2023-04-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+
+* __Introduction:__
+  + Quick paragraph on logic behind this script
+
+* __Setup:__
+  + Loads packages
+  + Prepares sample info
+  + Loads bam files
+
+
+* __Generate Fragment Profiles: __ 
+  + Function to calculate fragment counts
+  + Loop to produce fragment profile for each sample
+
+* __Plot Fragment Profiles: __ 
+  + Plots for individual samples
+  + Plots for fragment profiles combined by group
+
+
+## Introduction
+
+This script is an adaptation of the DELFI method created by Cristiano et. al (2019). It creates "fragment profiles" for each sample.
+The functions in this script break the genome of each sample into 5 Mbp bins and calculate the number of short (100-150 bp) and long (151-220 bp) fragments in each bin, plotting this data for each individual sample, as well as samples grouped by their cancer status.
+
+To run this script you will need:
+
+* a csv file containing:
+  + sample_id
+  + bam_path (i.e. path/to/bam)
+  + group (eg. high_crc, low_crc, healthy)
+* output folder path
+
+## Setup
+
+```{r Setup}
+library(GenomicAlignments)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(ggplot2)
+library(tidyverse)
+library(GenomicRanges)
+```
+
+
+```{r enter sample info}
+#sample_info <- "path/to/sample_data.csv"
+sample_info <- "~/genomic_features/data/bams/all_sample_info.csv"
+#output <- "path/to/output"
+output <-  "~/genomic_features/output/fragment_profiles"
+#path to regions of genome to filter out eg. centromeres, low map regions
+filter_path <- "/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/data/filters.hg19.rda"
+```
+
+
+
+```{r load sample info}
+sample_info <- read_csv(sample_info)
+samples <- sample_info$sample_id
+bams <- sample_info$bam_path
+
+head(samples)
+```
+
+
+
+```{bash create folders to organise output, eval = FALSE}
+# change to whatever your output directory is
+# cd $output
+mkdir granges
+mkdir counts
+mkdir graphs
+```
+
+
+It takes a long time to read in bams as GRange, so reading in and saving as RDS file for later use.
+Set eval = TRUE if this has not been done for your samples
+
+```{r load bams as GRange function, eval = FALSE}
+load_bam_as_GRange <- function(sample, bam_path, save = TRUE, save_path){
+  print(paste("Loading", sample, "as GRange."))
+  param <- ScanBamParam(flag = scanBamFlag(isDuplicate = FALSE,
+                                           isSecondaryAlignment = FALSE,
+                                           isUnmappedQuery = FALSE),
+                        mapqFilter = 30)
+  
+  gp <- readGAlignmentPairs(bam_path, param = param)
+  gr <- granges(keepSeqlevels(gp, paste0("chr", 1:22), pruning.mode="coarse"),
+                on.discordant.seqnames="drop")
+  if(save == TRUE){
+    print("Saving GRange")
+    saveRDS(gr, save_path)
+  }
+}
+
+
+for(i in 1:length(samples)){
+  save_path <- paste0(output, "/granges/", samples[i], ".gr.RDS")
+  load_bam_as_GRange(samples[i], bam_path = bams[i], save_path = save_path)
+}
+
+```
+
+
+## Generate Fragment Profiles
+
+This function counts number of short and long frags in 5Mbp windows getting fragment profiles data.
+This can also take a while, so again only set eval = TRUE if this has not been done for your samples.
+
+If plot density == TRUE, the function will also produce a density plot that shows the distribution of your fragment lengths.
+
+```{r function get fragment counts function, eval = FALSE}
+
+fragment_counts <- function(sample_id, gr, output, filters, plot_density = TRUE){
+  w.all <- width(gr)
+  q.all <- quantile(w.all, c(0.001, 0.999))
+  gr <- gr[which(w.all > q.all[1] & w.all < q.all[2])]
+  w.all <- width(gr)
+  gr.clean <- gr[-queryHits(findOverlaps(gr, filters.hg19))]
+  lengths <- data.frame(length = w.all)
+  
+  if(plot_density == TRUE){
+    uw <- unique(w.all)
+    modal_width <- uw[which.max(tabulate(match(w.all, uw)))]
+    dp <- ggplot(lengths, aes(x = length)) +
+      geom_density() +
+      geom_vline(xintercept = modal_width, linewidth = 0.2)
+    ggsave(filename = paste0(output, "/graphs/", sample_id, ".dp.png"), plot = dp, device = "png")
+  }
+  
+  print("Filtering")
+  w.all <- width(gr.clean)
+  fragments <- gr.clean[which(w.all >= 100 & w.all <= 220)]
+  w <- width(fragments)
+  bins <- tileGenome(seqinfo(Hsapiens),
+                     tilewidth = 5000000,
+                     cut.last.tile.in.chrom = TRUE)
+  chrms <- paste0("chr", 1:22)
+  bins <- bins[seqnames(bins) %in% chrms]
+  
+  print("Counting Fragments in each bin")
+  frag.list <- split(fragments, w)
+  counts <- sapply(frag.list, function(x) countOverlaps(bins, x)) 
+  #put counts into matrix
+  if(min(w) > 100) {
+    m0 <- matrix(0, ncol=min(w) - 100, nrow=nrow(counts),
+                 dimnames=list(rownames(counts), 100:(min(w)-1)))
+    counts <- cbind(m0, counts)
+  }
+  
+  short <- rowSums(counts[,1:51]) #adds up number of fragments between 100-150bp for each row/bin
+  long <- rowSums(counts[,52:121])
+  bins$short <- short
+  bins$long <- long
+  bins$ratio <- short/long
+  bins$nfrags <- short+long
+  
+  saveRDS(data.frame(bins), paste0(output, "/counts/", sample_id, ".counts.RDS"))
+}
+
+```
+
+This section runs the function above
+```{r run fragment counts, eval = FALSE}
+# filters.hg19 obtained from Delfi script 00-filtered_regions.r
+filters <- load(filter_path)
+
+for(i in 1:length(samples)){
+  print(samples[i])
+  gr <- readRDS(paste0(output, "/granges/", samples[i], ".gr.RDS"))
+  fragment_counts(sample_id = samples[i], gr = gr, output = output, filters = filters, plot_density = TRUE)
+}
+
+
+```
+
+
+
+## Plot fragment profiles
+
+```{r plot individual frag profiles, eval = FALSE}
+
+for(i in samples){
+  bin.df <- readRDS(paste0(output, "/counts/", i, ".counts.RDS"))
+  fp <- ggplot(bin.df, aes(start, ratio)) +
+        geom_line(linewidth = 0.2) +
+        labs(y = "Ratio") +
+        facet_grid(.~seqnames,
+                   scales = "free",
+                   space = "free",
+                   switch = "both") +
+        scale_x_continuous(breaks = round(seq(min(bin.df$start),
+                                              max(bin.df$start),
+                                              by = 100000000),1)) +
+        theme_minimal() +
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.title.x = element_blank(),
+              axis.line = element_line(color = "black"),
+              strip.background = element_rect(
+                color = "white", fill = "white"),
+              strip.placement = "outside",
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank())
+  
+ggsave(plot = fp,
+       filename = paste0(output, "/graphs/", i, ".fp.png"),
+       device = "png",
+       width = 12, height = 1.5, units = "in")
+  
+}
+
+
+```
+
+
+
+
+The function below can be used to plot fragment profiles separated by group. Function requires:
+
+* sample_ids:
+  * A character vector of sample ids with fps you want to combine.
+  * Samples must have corresponding count data in "output/counts" named [id].counts.RDS
+* mean.colour:
+  * string indicating the colour you want the mean line to be
+* output:
+  * path to output directory.
+  * directory must contain subdirectory named counts with corresponding fp counts data (generated above)
+  * directory must contain subdirectory with subdirectory called graphs
+* group.name
+  * a string indicating the category that the fps you are combining fall into
+  * eg. if you are combining healthy control fps, enter "controls" and final plot will be called "controls.scaled.fp.png"
+* scale:
+  * this is automatically set to false. This option indicates whether you want the graphs to be zero-centered, or have their true median.
+
+
+```{r function combine frag profiles}
+
+combine_fps <- function(sample.ids, mean.colour, output, group.name, scale = FALSE){
+  
+  # combine data into one tibble
+  paths <- paste0(output, "/counts/", sample.ids, ".counts.RDS")
+  bins.list <- lapply(paths, readRDS)
+  tib.list <- lapply(bins.list, as_tibble)
+  names(tib.list) <- sample.ids
+  
+  if(scale == TRUE){
+    for(i in 1:length(tib.list)){
+      tib.list[[i]] <- mutate(tib.list[[i]], ratio = scale(ratio)[,1])
+    }
+  }
+  combined.counts <- map2(tib.list, names(tib.list), ~ mutate(.x, id = .y)) %>%
+    bind_rows() %>% dplyr::select(id, everything())
+  
+  if(scale == FALSE){
+    saveRDS(combined.counts, paste0(output, "/counts/", group.name, ".df.RDS"))
+  } else {
+    saveRDS(combined.counts, paste0(output, "/counts/", group.name, ".df.scaled.RDS"))
+  }
+  
+  # get average
+  bin.averages <- combined.counts %>%
+    group_by(start, seqnames) %>%
+    summarise(mean.ratio = mean(ratio))
+  
+  # fragment profile ggplot theme
+  theme_fp <- theme_minimal() +
+              theme(axis.text.x = element_blank(),
+                    axis.ticks.x = element_blank(),
+                    axis.title.x = element_blank(),
+                    axis.line = element_line(color = "black"),
+                    strip.background = element_rect(color = "white", fill = "white"),
+                    strip.placement = "outside",
+                    #strip.text.x.bottom = element_text(angle = 90),
+                    panel.grid.major = element_blank(),
+                    panel.grid.minor = element_blank())
+  
+  combined.fp.plot <- ggplot(combined.counts, aes(start, ratio)) +
+      geom_line(aes(group = id), color = "#737373", size = 0.2) +
+      labs(y = "Ratio") +
+      facet_grid(.~seqnames,
+               scales = "free",
+               space = "free",
+               switch = "both") +
+      scale_x_continuous(breaks = round(seq(min(combined.counts$start),
+                                            max(combined.counts$start),
+                                            by = 100000000),1)) +
+      theme_fp +
+      ylim(0,0.8)
+  
+  combined.fp.plot + geom_line(data = bin.averages,
+                             aes(start, mean.ratio),
+                             size = 0.5, color = mean.colour)
+  
+  if(scale == FALSE){
+    ggsave(filename = paste0(output, "/graphs/", group.name, ".unscaled.fp.png"),
+           device = "png",
+           width = 12,
+           height = 1.5,
+           units = "in")
+  } else {
+    ggsave(filename = paste0(output, "/graphs/", group.name, ".scaled.fp.png"),
+           device = "png",
+           width = 12,
+           height = 1.5,
+           units = "in")
+  }
+
+}
+
+
+
+```
+
+
+
+
+
+```{r combine frag profiles, eval = FALSE}
+combine_fps(sample.ids = samples,
+            mean.colour = "grey",
+            output = output,
+            group.name = "all",
+            scale = FALSE)
+
+sample_info$group
+
+## BRCA
+brca_info <- sample_info[sample_info$group == "my_brca",]
+brca_samples <- brca_info$sample_id
+combine_fps(sample.ids = brca_samples,
+            mean.colour = "pink",
+            output = output,
+            group.name = "brca")
+combine_fps(sample.ids = brca_samples,
+            mean.colour = "pink",
+            output = output,
+            group.name = "brca",
+            scale = TRUE)
+
+## my CRC
+# high
+my_crc_info <- sample_info[sample_info$group == "my_crc",]
+my_crc_info <- my_crc_info %>%
+  mutate(group = ifelse(substr(sample_id, nchar(sample_id), nchar(sample_id)) == "H",
+                         "high", "low"))
+my_crc_high <- my_crc_info[my_crc_info$group == "high",]
+combine_fps(sample.ids = my_crc_high$sample_id,
+            mean.colour = "red",
+            output = output,
+            group.name = "my_crc_high")
+combine_fps(sample.ids = my_crc_high$sample_id,
+            mean.colour = "red",
+            output = output,
+            group.name = "my_crc_high",
+            scale = TRUE)
+
+# low
+my_crc_low <- my_crc_info[my_crc_info$group == "low",]
+combine_fps(sample.ids = my_crc_low$sample_id,
+            mean.colour = "blue",
+            output = output,
+            group.name = "my_crc_low")
+combine_fps(sample.ids = my_crc_low$sample_id,
+            mean.colour = "blue",
+            output = output,
+            group.name = "my_crc_low",
+            scale = TRUE)
+
+
+# Delfi CRC
+delfi_crc_info <- sample_info[sample_info$group == "delfi_crc",]
+
+combine_fps(sample.ids = delfi_crc_info$sample_id,
+            mean.colour = "black",
+            output = output,
+            group.name = "delfi_crc",
+            scale = FALSE)
+combine_fps(sample.ids = delfi_crc_info$sample_id,
+            mean.colour = "orange",
+            output = output,
+            group.name = "delfi_crc",
+            scale = TRUE)
+
+# Healthy
+delfi_healthy_info <- sample_info[sample_info$group == "healthy",]
+
+combine_fps(sample.ids = delfi_healthy_info$sample_id,
+            mean.colour = "black",
+            output = output,
+            group.name = "delfi_healthy",
+            scale = FALSE)
+combine_fps(sample.ids = delfi_healthy_info$sample_id,
+            mean.colour = "black",
+            output = output,
+            group.name = "delfi_healthy",
+            scale = TRUE)
+
+
+```

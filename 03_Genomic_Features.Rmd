@@ -1,0 +1,849 @@
+---
+title: "Genomic Features"
+author: "Alice McAtamney"
+date: "2023-05-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+title: "Genomic_Features.rmd"
+author: "Alice McAtamney"
+date: "2023-05-23"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Summary
+
+* __Introduction:__
+  + Quick paragraph on logic behind this script
+
+* __Setup:__
+  + Loads packages
+  + Prepares sample info
+
+* __Investigation of short and long fragment coverage in genomic features:__
+  + Function that assesses proportion of short and long fragments for a given set of regions
+  + Exon results
+  + Promoter results
+  + G4 results
+  + 5' UTR results
+  + Random regions results
+  + Regions surrounding the transcription start site
+
+* __Investigation of short and long fragment coverage in transcriptionally active genes:__
+  + Load and prepare promoters of genes with differential expression
+  + Investigate highly expressed COAD genes
+  + Investigate highly expressed BRCA genes
+  + Investigate highly expressed healthy whole blood genes
+  + Investigate genes with low expression in all groups
+
+
+## Introduction
+An exploration of short fragments in different genomic features.
+
+To run this script you need:
+  - a csv file containing:
+    * sample_id
+    * bam_path (i.e. path/to/bam)
+    * group (eg. high_crc, low_crc, healthy, brca)
+  - a directory containing .RDS files of the bam files that have been converted to GenomicRanges
+    * can get by running 01_Create_Fragment_Profiles.Rmd
+  - csv files containing positions of regions of interest (eg. exon data downloaded from UCSC tables)
+  - please ensure data matches the genome version that your bam files are aligned to (eg. hg19)
+  - path to output directory
+  - path to data directory
+
+
+## Setup
+
+```{r load libraries, echo=FALSE}
+
+library(tidyverse)
+library(Homo.sapiens)
+library(GenomicRanges)
+
+```
+
+
+
+```{r prep sample ids, echo=FALSE}
+# path to sample info. Must sample_id + group column
+sample_info <- "/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/data/bams/all_sample_info.csv"
+sample_info <- read_csv(sample_info)
+all_samples <- sample_info$sample_id
+head(all_samples)
+
+gr_dir <- "/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output/fragment_profiles/granges"
+data <- "/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/data/genomic_features"
+output <- "/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output/genomic_features/central_60bp/"
+
+
+```
+
+
+## Compare proportion of short fragments vs long fragments at different genomic features.
+
+```{r}
+
+compare_short_vs_long_in_genomic_features <- function(samples, sample_gr_dir, genomic_feature_gr){
+  gen_feature_ol_percent <- list(sample = NA,
+                            percent_shorts_in_gf = NA,
+                            percent_longs_in_gf = NA,
+                            sum_shorts_in_gf = NA,
+                            sum_longs_in_gf = NA) %>% as_tibble()
+  for(sample in samples){
+    print(sample)
+    sample_gr <- readRDS(paste0(sample_gr_dir, "/", sample, ".gr.RDS"))
+    frag_lengths <- width(sample_gr)
+    shorts <- sample_gr[which(frag_lengths >= 100 & frag_lengths < 150),]
+    shorts <- resize(shorts, 60, fix = "center")
+    longs <- sample_gr[which(frag_lengths >= 150 & frag_lengths < 220),]
+    longs <- resize(longs, 60, fix = "center")
+    total_shorts <- length(shorts)
+    total_longs <- length(longs)
+    sh_ol <- findOverlaps(genomic_feature_gr, shorts)
+    sh_ol <- sh_ol[!duplicated(subjectHits(sh_ol))] 
+    l_ol <- findOverlaps(genomic_feature_gr, longs)
+    l_ol <- l_ol[!duplicated(subjectHits(l_ol))]
+
+
+    percent_shorts_in_gfs <- length(queryHits(sh_ol))/total_shorts
+    percent_longs_in_gfs <- length(queryHits(l_ol))/total_longs
+    
+  
+    gen_feature_ol_percent <- add_row(gen_feature_ol_percent,
+            sample = sample,
+            percent_shorts_in_gf = percent_shorts_in_gfs,
+            percent_longs_in_gf = percent_longs_in_gfs,
+            sum_shorts_in_gf = length(queryHits(sh_ol)),
+            sum_longs_in_gf = length(queryHits(l_ol)))
+
+  }
+  gen_feature_ol_percent <- gen_feature_ol_percent[-1,]
+  return(gen_feature_ol_percent)
+}
+
+
+
+```
+
+
+
+
+# Exons
+
+```{r prep exon gr, eval = FALSE}
+exons <- read_tsv(paste0(data, "/ucsc_tables_exons.csv"))
+colnames(exons) <- c("seqnames", "Start", "End", "genesymbol")
+exons <- makeGRangesFromDataFrame(exons, keep.extra.columns = TRUE)
+
+
+exon_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                           sample_gr_dir = gr_dir,
+                                                           genomic_feature_gr = exons)
+
+saveRDS(exon_percents, paste0(output, "/exon.RDS"))
+
+```
+
+```{r}
+exon_percents <- readRDS(paste0(output, "/exon.RDS"))
+
+exon_percents <- exon_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                         percent_longs_in_gf),
+                                                         names_to = "short.or.long",
+                                                         values_to = "percent_of_fragments_overlapping_exons")
+
+exon_percents <- exon_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+exon_percents <- exon_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+exon_percents <- exon_percents[exon_percents$group != "brca",]
+
+exon_percents
+exon_plot <- ggplot(exon_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_exons, group = sample, color = group)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  #ggtitle("Proportion of Fragments Overlapping with Exons") +
+  ylab("Percent of fragments that overlap exons") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+
+exon_plot
+
+ggsave(paste0(output, "/plots/exons.png"), exon_plot,width = 10, height = 8)
+
+
+friedman.test(percent_of_fragments_overlapping_exons ~ short.or.long | sample, data = exon_percents)
+#Friedman chi-squared = 74, df = 1, p-value < 2.2e-16 central 60
+
+```
+
+
+# Promoters
+
+Are short fragments more likely to sit in promoters than long fragments?
+Calculate the % of short frags that are located in promoter regions compared to % of long frags
+
+
+```{r prep promoter gr, eval = FALSE}
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+genes <- genes(txdb)
+promoters <- promoters(txdb, upstream = 2000, downstream = 500) %>%
+  trim(use.names = TRUE)
+
+promoter_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                               sample_gr_dir = gr_dir,
+                                                               genomic_feature_gr = promoters)
+
+
+saveRDS(promoter_percents, paste0(output, "/genomic_features/promoter.RDS"))
+```
+
+
+```{r}
+promoter_percents <- readRDS(paste0(output, "/promoter.RDS"))
+
+promoter_percents <- promoter_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf,
+  percent_longs_in_gf),
+  names_to = "short.or.long",
+  values_to = "percent_of_fragments_overlapping_promoters")
+
+promoter_percents <- promoter_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+promoter_percents <- promoter_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+promoter_percents <- promoter_percents[promoter_percents$group != "brca",]
+
+promoter_plot <- ggplot(promoter_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_promoters, group = sample, color = group)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  #ggtitle("Proportion of Fragments Overlapping with Promoters") +
+  ylab("Percent of fragments that overlap promoters") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+
+promoter_plot
+
+ggsave(paste0(output, "/plots/promoters.png"), promoter_plot, width = 10, height = 8)
+friedman.test(percent_of_fragments_overlapping_promoters ~ short.or.long | sample, data = promoter_percents)
+
+#Friedman chi-squared = 74, df = 1, p-value < 2.2e-16 #central_60bp
+```
+
+
+
+# G4s
+```{r, eval = FALSE}
+G4s <- read_tsv(paste0(data, "/GSE63874_MERGED_PDS_plus_hits_intersect.bed"), col_names= FALSE)
+colnames(G4s) <- c("seqnames", "start", "end")
+G4.gr <- makeGRangesFromDataFrame(G4s)
+hist(width(G4.gr))
+G4_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                         sample_gr_dir = gr_dir,
+                                                         genomic_feature_gr = G4.gr)
+
+saveRDS(G4_percents, paste0(output, "/genomic_features/G4.RDS"))
+
+```
+
+```{r}
+G4_percents <- readRDS(paste0(output, "/G4.RDS"))
+G4_percents <- G4_percents %>%
+  pivot_longer(cols = c(percent_shorts_in_gf,
+                        percent_longs_in_gf),
+                        names_to = "short.or.long",
+                        values_to = "percent_of_fragments_overlapping_G4s")
+
+
+G4_percents <- G4_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+G4_percents <- G4_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+G4_percents <- G4_percents[G4_percents$group != "brca",]
+
+G4_percents
+G4_plot <- ggplot(G4_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_G4s, group = sample, color = group)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  #ggtitle("Proportion of Fragments Overlapping with G4s") +
+  ylab("Percent of fragments that overlap G4s") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+G4_plot
+ggsave(paste0(output, "/plots/G4_plot.png"), G4_plot, width = 10, height = 8)
+
+friedman.test(percent_of_fragments_overlapping_G4s ~ short.or.long | sample, data = G4_percents)
+
+#Friedman chi-squared = 21.622, df = 1, p-value = 3.321e-06 #central 60
+
+```
+
+
+
+# 5' UTRs
+
+* To do: check where 5' UTRs sit relative to TSS
+* make wider to check width is not effecting results.
+
+
+```{r get fiveUTR overlaps, eval = FALSE}
+fiveUTR <- read_tsv(paste0(data,"/refseq_tables_5UTRS.csv"), col_names = FALSE)
+colnames(fiveUTR) <- c("seqnames", "Start", "End", "id", "unknown", "strand")
+fiveUTR <- makeGRangesFromDataFrame(fiveUTR, keep.extra.columns = TRUE)
+
+
+fiveUTR_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                              sample_gr_dir = gr_dir,
+                                                              genomic_feature_gr = fiveUTR)
+
+saveRDS(fiveUTR_percents, paste0(output, "/genomic_features/fiveUTR.RDS"))
+
+```
+
+```{r}
+fiveUTR_percents <- readRDS(paste0(output, "/fiveUTR.RDS"))
+
+fiveUTR_percents <- fiveUTR_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_overlapping_fiveUTRs")
+
+fiveUTR_percents <- fiveUTR_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+fiveUTR_percents <- fiveUTR_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+fiveUTR_percents <- fiveUTR_percents[fiveUTR_percents$group != "brca",]
+
+fiveUTR_plot <- ggplot(fiveUTR_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_fiveUTRs, group = sample, color = group)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank(),
+        text=element_text(size=20)
+        ) +
+  #ggtitle("Proportion of Fragments Overlapping with 5' UTRs") +
+  ylab("Percent of fragments that overlap 5' UTRs") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+fiveUTR_plot
+
+ggsave(paste0(output, "/plots/fiveUTR_percents.png"), fiveUTR_plot, width = 10, height = 8)
+
+friedman.test(percent_of_fragments_overlapping_fiveUTRs ~ short.or.long | sample, data = fiveUTR_percents)
+#Friedman chi-squared = 23.838, df = 1, p-value = 1.048e-06 whole frag
+
+```
+
+
+
+# Random
+
+```{r get fiveUTR overlaps, eval = FALSE}
+library(regioneR)
+library(Homo.sapiens)
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+#need to trim all ranges that will end up out of bounds when window shifts
+window <- promoters(txdb, upstream = 2000, downstream = 0)
+keys <- as.character(window$tx_name)
+AnnotationDbi::select(Homo.sapiens,
+                      keys = keys,
+                      columns = c("TXNAME", "SYMBOL"),
+                      keytype = "TXNAME") -> conversion.df
+
+mcols(window)$symbol <- conversion.df$SYMBOL
+window
+# only want one transcript per gene, just using first transcript
+# promoter should be approx same region anyway
+window <- window[-which(duplicated(window$symbol)),]
+chrms <- paste0("chr", 1:22)
+window <- window[window@seqnames %in% chrms]
+length(window)
+random_regions <- randomizeRegions(window, pruning.mode = "coarse")
+random_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                             sample_gr_dir = gr_dir,
+                                                             genomic_feature_gr = random_regions)
+
+saveRDS(random_percents, paste0(output, "/random_percents.RDS"))
+
+```
+
+
+
+```{r}
+random_percents <- readRDS(paste0(output, "/random_percents.RDS"))
+#random_percents <- readRDS("~/genomic_features/output/genomic_features/whole_fragog_random_percents.RDS")
+random_percents
+random_percents <- random_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_overlapping_random2000bp_regions")
+
+
+random_percents <- random_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+random_percents <- random_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+random_percents <- random_percents[random_percents$group != "brca",]
+
+
+random_plot <- ggplot(random_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_random2000bp_regions, group = sample, color = group)) +
+  geom_point() +
+  #facet_grid(~group) +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank(), 
+        text=element_text(size=20)) +
+  #ggtitle("Proportion of Fragments Overlapping with Random Regions (2000 bp)") +
+  ylab("Percent of fragments that overlap with random regions") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+
+random_plot
+
+ggsave(paste0(output, "/plots/random_plot.png"), random_plot, width = 10, height = 8)
+
+friedman.test(percent_of_fragments_overlapping_random2000bp_regions ~ short.or.long | sample, data = random_percents)
+
+#Friedman chi-squared = 15.622, df = 1, p-value = 7.736e-05 central_60
+
+```
+
+
+
+# Investigation of windows surrounding the TSS
+
+Percent of short fragments appears to differ depending on distance from the TSS. Investigating further looking at windows surrouding the TSS.
+
+
+```{r prep windows gr, eval = FALSE}
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+#need to trim all ranges that will end up out of bounds when window shifts
+window <- promoters(txdb, upstream = 2000, downstream = 0)
+chrms <- paste0("chr", 1:22)
+window <- window[seqnames(window) %in% chrms]
+
+# Filters out all windows that will be out of bounds of the chromosome when the window moves along
+window <- shift(window, 6000) %>% trim(use.names = TRUE) 
+window <- shift(window, -12000) %>% trim(use.names = TRUE)
+window <- shift(window, 6000)
+
+upstream_points <- seq(-6000, 6000, 1000)
+upstream_position <- -6000
+downstream_position <- -4000
+window_region <- paste0(upstream_position, "to", downstream_position)
+
+for(i in 1:length(upstream_points)){
+  window_percents <-  compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = window)
+  saveRDS(window_percents, paste0(output, "//windows_rds/", window_region, "_bp_around_TSS.RDS"))
+  upstream_position <- upstream_position + 1000
+  downstream_position <- downstream_position + 1000
+  window_region <- paste0(upstream_position, "to", downstream_position)
+  window <- shift(window, 1000) %>% trim(use.names = TRUE)
+}
+
+```
+
+
+```{r}
+upstream_points <- seq(-6000, 10000, 1000)
+
+for(upstream in upstream_points){
+  filename <- paste0(upstream, "to", 2000 + upstream, "_bp_around_TSS.RDS")
+  window_percents <- readRDS(paste0(output, "/windows_rds/", filename))
+  window_percents <- window_percents %>%
+    pivot_longer(cols = c(percent_shorts_in_gf,
+                          percent_longs_in_gf),
+                          names_to = "short.or.long",
+                          values_to = "percent_of_fragments_overlapping_window")
+  
+  #ggplot(window_percents, aes(x = short.or.long,
+  #                            y= percent_of_fragments_overlapping_window,
+  #                            color = sample)) +
+  #  geom_point() +
+  #  geom_line(aes(group = sample)) +
+  #  theme(legend.position = "none") +
+  #  ggtitle(paste(upstream, "to", 2000 + upstream)) +
+  #  ylim(c(0, 0.023))
+  
+  window_percents <- window_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+
+  window_percents <- window_percents %>%
+  mutate(short.or.long = case_when(short.or.long == "percent_shorts_in_gf" ~ "Short Fragments",
+                                   short.or.long == "percent_longs_in_gf" ~ "Long Fragments"))
+window_percents <- window_percents[window_percents$group != "brca",]
+
+window_plot <- ggplot(window_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_window, group = sample, color = group)) +
+  geom_point() +
+  geom_line(aes(group = sample)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank()) +
+  ylab("Percent of fragments that overlap with windows") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3")) +
+  #ylim(0.01,0.025)
+  ylim(0.018, 0.043)
+
+  ggsave(filename = paste0(output, "/plots/windows/", upstream, "to", 2000 + upstream, ".png"),plot = last_plot(), device = "png", width = 10, height = 8)
+  
+}
+
+
+
+ggplot(window_percents, aes(x = short.or.long, y= percent_of_fragments_overlapping_window, group = sample, color = group)) +
+  geom_point(aes(y= percent_of_fragments_overlapping_window)) +
+  geom_line() +
+  theme(#legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        panel.background = element_blank()) +
+  ylab("Percent of fragments that overlap with windows") +
+  xlab("") +
+  scale_colour_manual(values = c("brown2", "steelblue3"))
+  
+
+
+
+
+```
+
+
+```{r}
+#upstream_points <- c(-2000, -1500, -1000, -500, 0, 500, 1000, 1500, 2000, 2500, 3000, 3500)
+
+upstream_points <- seq(-6000, 6000, 1000)
+for(upstream in upstream_points){
+  filename <- paste0(upstream, "to", 2000 + upstream, "_bp_around_TSS.RDS")
+  window_percents <- readRDS(paste0(output, "/genomic_features/windows_rds/", filename))
+  window_percents <- window_percents %>%
+    pivot_longer(cols = c(sum_shorts_in_gf,
+                          sum_longs_in_gf),
+                          names_to = "short.or.long",
+                          values_to = "sum_of_fragments_overlapping_window")
+  
+  ggplot(window_percents, aes(x = short.or.long,
+                              y= sum_of_fragments_overlapping_window,
+                              color = sample)) +
+    geom_point() +
+    geom_line(aes(group = sample)) +
+    theme(legend.position = "none") +
+    ggtitle(paste(upstream, "to", 2000 + upstream))
+  
+  ggsave(filename = paste0(output, "/genomic_features/plots/sum_windows/sum_", upstream, "to", 2000 + upstream, ".png"), plot = last_plot(), device = "png")
+  
+}
+```
+
+
+
+
+
+
+
+## Investigation of short and long fragment coverage in transcriptionally active genes
+Only run this if you have run 01.5_RNAseq_analysis.Rmd to get lists of differential expressed genes
+
+Investigating whether more transcriptionally active genes have a higher proportion of short fragments compared to long fragments.
+
+
+```{r load DE genes}
+### Differentially Expressed Gene Promoters ###
+
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+genes <- genes(txdb)
+promoters <- promoters(txdb, upstream = 2000, downstream = 100) %>%
+  trim(use.names = TRUE)
+
+high_in_coad <- read_lines(paste0("/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output", "/RNAseq/redo_top300_high_coad.txt"))
+high_in_blood <- read_lines(paste0("/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output", "/RNAseq/redo_top300_high_blood.txt"))
+high_in_brca <- read_lines(paste0("/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output", "/RNAseq/redo_top300_high_brca.txt"))
+low_in_all <- read_lines(paste0("/Volumes/archive/userdata/student_users/alicemcatamney/genomic_features/output", "/RNAseq/low_in_coad_blood_and_brca.txt"))
+
+
+
+keys <- as.character(promoters$tx_id)
+AnnotationDbi::select(Homo.sapiens, keys = keys, columns = c("TXID", "ENTREZID", "SYMBOL"), keytype = "TXID") -> conversion.df
+mcols(promoters)$symbol <- conversion.df$SYMBOL
+
+# select 1 transcript per gene
+promoters <- promoters[!duplicated(promoters$symbol),]
+coad_pros <- promoters[promoters$symbol %in% high_in_coad,]
+brca_pros <- promoters[promoters$symbol %in% high_in_brca,]
+blood_pros <- promoters[promoters$symbol %in% high_in_blood,]
+low_pros <-  promoters[promoters$symbol %in% low_in_all,]
+
+brca_pros
+high_in_blood
+blood_pros %>% length()
+coad_pros %>% length()
+low_pros %>% length()
+```
+
+# COAD
+Would expect enrichment in crc patients, but no enrichment in controls
+```{r, eval = FALSE}
+high_coad_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = coad_pros)
+
+saveRDS(high_coad_percents, paste0(output, "/high_coad_pros.RDS"))
+
+```
+
+```{r}
+high_coad_percents <- readRDS(paste0(output, "/high_coad_pros.RDS"))
+high_coad_percents
+high_coad_percents <- high_coad_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_COAD_highly_expressed_promoters")
+
+high_coad <- high_coad_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+
+
+high_coad <- high_coad %>% mutate(short.or.long = ifelse(short.or.long == "percent_longs_in_gf", "Long fragments", "Short fragments"))
+
+coad_plot <- ggplot(high_coad, aes(x = short.or.long, y= percent_of_fragments_COAD_highly_expressed_promoters)) +
+  geom_point(aes(group = sample)) +
+  geom_line(aes(group = sample)) +
+  facet_wrap(~group) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  ylab("Percent of fragments") +
+  xlab("")
+coad_plot
+ggsave(paste0(output, "/plots/coad.png"), coad_plot,width = 10, height = 8)
+
+
+## Test
+high_coad_crc <- high_coad[high_coad$group == "CRC",]
+high_coad_healthy <- high_coad[high_coad$group == "Healthy",]
+friedman.test(percent_of_fragments_COAD_highly_expressed_promoters ~ short.or.long | sample, data = high_coad_crc)
+#Friedman chi-squared = 0.037037, df = 1, p-value = 0.8474
+friedman.test(percent_of_fragments_COAD_highly_expressed_promoters ~ short.or.long | sample, data = high_coad_healthy)
+#data:  percent_of_fragments_COAD_highly_expressed_promoters and short.or.long and sample
+#Friedman chi-squared = 19.593, df = 1, p-value = 9.584e-06
+
+
+```
+
+
+# BRCA
+
+```{r, eval = FALSE}
+high_brca_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                 sample_gr_dir = gr_dir,
+                                                                 genomic_feature_gr = brca_pros)
+
+saveRDS(high_brca_percents, paste0(output, "/high_brca_pros_og.RDS"))
+
+```
+
+
+```{r}
+high_brca_percents <- readRDS(paste0(output, "/high_brca_pros_og.RDS"))
+high_brca_percents
+high_brca_percents <- high_brca_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_BRCA_highly_expressed_promoters")
+
+high_brca <- high_brca_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+high_brca <- high_brca %>% mutate(short.or.long = ifelse(short.or.long == "percent_longs_in_gf", "Long fragments", "Short fragments"))
+high_brca
+brca_plot <- ggplot(high_brca, aes(x = short.or.long, y= percent_of_fragments_BRCA_highly_expressed_promoters)) +
+  geom_point(aes(group = sample)) +
+  geom_line(aes(group = sample)) +
+  facet_wrap(~group) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  ylab("Percent of fragments") +
+  xlab("")
+
+brca_plot
+ggsave(paste0(output, "/plots/brca.png"), brca_plot,width = 10, height = 8)
+
+
+
+```
+
+
+
+# Blood
+Expect to see similar in all groups I think - higher shorts
+```{r, eval = FALSE}
+high_blood_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                                sample_gr_dir = gr_dir,
+                                                                genomic_feature_gr = blood_pros)
+
+saveRDS(high_blood_percents, paste0(output, "/high_blood_pros_og.RDS"))
+
+```
+
+```{r}
+high_blood_percents <- readRDS(paste0(output, "/high_blood_pros_og.RDS"))
+high_blood_percents
+high_blood_percents <- high_blood_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                 percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_blood_highly_expressed_promoters")
+
+high_blood_percents
+high_blood <- high_blood_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+
+
+high_blood <- high_blood %>% mutate(short.or.long = ifelse(short.or.long == "percent_longs_in_gf", "Long fragments", "Short fragments"))
+high_blood
+blood_plot <- ggplot(high_blood, aes(x = short.or.long, y= percent_of_fragments_blood_highly_expressed_promoters)) +
+  geom_point(aes(group = sample)) +
+  geom_line(aes(group = sample)) +
+  facet_wrap(~group) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  ylab("Percent of fragments") +
+  xlab("")
+blood_plot
+ggsave(paste0(output, "/plots/blood.png"), blood_plot,width = 10, height = 8)
+
+
+## Test 
+hb2 <- high_blood %>% pivot_wider(names_from = short.or.long,
+                           values_from = percent_of_fragments_blood_highly_expressed_promoters) %>%
+  mutate(dif = `Long fragments` - `Short fragments`)
+
+hb2[hb2$dif >0,]
+
+high_blood_crc <- high_blood[high_blood$group == "CRC",]
+high_blood_healthy <- high_blood[high_blood$group == "Healthy",]
+friedman.test(percent_of_fragments_blood_highly_expressed_promoters ~ short.or.long | sample, data = high_blood_crc)
+#Friedman chi-squared = 40.333, df = 1, p-value = 2.141e-10
+friedman.test(percent_of_fragments_blood_highly_expressed_promoters ~ short.or.long | sample, data = high_blood_healthy)
+#Friedman chi-squared = 28, df = 1, p-value = 1.213e-07
+
+```
+
+
+
+# Low expression in all
+
+```{r, eval = FALSE}
+low_all_percents <- compare_short_vs_long_in_genomic_features(samples = all_samples,
+                                                              sample_gr_dir = gr_dir,
+                                                              genomic_feature_gr = low_pros)
+
+saveRDS(low_all_percents, paste0(output, "/low_in_all_pros_og.RDS"))
+
+```
+
+```{r}
+low_in_all_percents <- readRDS(paste0(output, "/low_in_all_pros_og.RDS"))
+low_in_all_percents <- low_in_all_percents %>% pivot_longer(cols = c(percent_shorts_in_gf,
+                                                                    percent_longs_in_gf),
+                                                        names_to = "short.or.long",
+                                                        values_to = "percent_of_fragments_low_expressed_promoters")
+
+low_in_all <- low_in_all_percents %>% mutate(group = case_when(substr(sample,1,1) == "M" ~ "CRC",
+                                                             substr(sample,1,1) == "P" ~ "CRC",
+                                                             substr(sample,1,1) == "d" ~ "CRC",
+                                                             substr(sample,1,1) == "E" ~ "Healthy",
+                                                             substr(sample,1,1) == "B" ~ "brca"))
+
+#low_in_all <- low_in_all[-which(substr(low_in_all$sample,1,1) == "B"),]
+low_in_all
+low_in_all <- low_in_all %>% mutate(short.or.long = ifelse(short.or.long == "percent_longs_in_gf", "Long fragments", "Short fragments"))
+
+
+low_plot <- ggplot(low_in_all, aes(x = short.or.long, y= percent_of_fragments_low_expressed_promoters)) +
+  geom_point(aes(group = sample)) +
+  geom_line(aes(group = sample)) +
+  facet_wrap(~group) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black", linewidth = 0.2),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_blank(),
+        text=element_text(size=20)) +
+  ylab("Percent of fragments") +
+  xlab("")
+low_plot
+ggsave(paste0(output, "/plots/low_in_all.png"), low_plot,width = 10, height = 8)
+
+## Test
+low_in_all_crc <- low_in_all[low_in_all$group == "CRC",]
+low_in_all_healthy <- low_in_all[low_in_all$group == "Healthy",]
+friedman.test(percent_of_fragments_low_expressed_promoters ~ short.or.long | sample, data = low_in_all_crc)
+#Friedman chi-squared = 13.298, df = 1, p-value = 0.0002657
+friedman.test(percent_of_fragments_low_expressed_promoters ~ short.or.long | sample, data = low_in_all_healthy)
+#Friedman chi-squared = 1.8148, df = 1, p-value = 0.1779
+
+```
+
+

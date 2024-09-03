@@ -1,0 +1,225 @@
+---
+title: "RNAseq analysis"
+author: "Alice McAtamney"
+date: "2023-06-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The purpose of this analysis is to get a list of genes that have high expression in cancer, and a low expression in healthy tissue and blood. These genes will be used in further analysis to see if highly expressed cancer genes show different frag patterns in cancer vs controls. I want genes with low expression in whole blood as high blood expression may drown out any signal.
+
+I am using TCGA data for CRC and BRCA samples. Counts have been processed to reduce batch effect so they can be directly compared to Gtex data. Unfortunately this was not reproduced with whole blood data, so I am getting that from a different source (https://storage.googleapis.com/adult-gtex/bulk-gex/v8/rna-seq/counts-by-tissue/gene_reads_2017-06-05_v8_whole_blood.gct.gz). Since I am only looking at the largest changes hopefully this won't make too much of an impact on the most differentially expressed genes.
+files downloaded from https://figshare.com/articles/dataset/Data_record_1/5330539?file=9150214
+nature scientific data paper Schultz et al 2018 reprocessed bam files to reduce batch effect
+https://www.nature.com/articles/sdata201861
+Unifying cancer and normal RNA sequencing data from different sources
+
+```{r load libraries}
+library(tidyverse)
+library(edgeR)
+```
+
+
+```{r }
+data <- "/Volumes/userdata/student_users/alicemcatamney/genomic_features/data/RNAseq"
+output <- "/Volumes/userdata/student_users/alicemcatamney/genomic_features/output/RNAseq"
+```
+
+```{r}
+coad_tumour <- read_tsv(paste0(data, "/coad-rsem-count-tcga-t.txt"))
+coad_normal <- read_tsv(paste0(data, "/coad-rsem-count-tcga.txt"))
+colon_gtex <- read_tsv(paste0(data, "/colon-rsem-count-gtex.txt"))
+brca_tumour <- read_tsv(paste0(data, "/brca-rsem-count-tcga-t.txt"))
+brca_normal <- read_tsv(paste0(data, "/brca-rsem-count-tcga.txt"))
+breast_gtex <- read_tsv(paste0(data, "/breast-rsem-count-gtex.txt"))
+blood <- read_tsv(paste0(data, "/gene_reads_2017-06-05_v8_whole_blood.gct"))
+
+ncol(coad_tumour)
+ncol(colon_gtex)
+colnames(blood)
+```
+
+
+
+# Merge
+
+ensure each dataset contains each of the genes
+```{r}
+coad_t <- arrange(coad_tumour, Hugo_Symbol)
+coad_m <- arrange(coad_normal, Hugo_Symbol)
+colon <- arrange(colon_gtex, Hugo_Symbol)
+brca_t <- arrange(brca_tumour, Hugo_Symbol)
+brca_m <- arrange(brca_normal, Hugo_Symbol)
+breast <- arrange(breast_gtex, Hugo_Symbol)
+whole_blood <- arrange(blood, Description)
+
+coad_t <- coad_t[which(coad_t$Hugo_Symbol %in% whole_blood$Description),]
+coad_m <- coad_m[which(coad_m$Hugo_Symbol %in% whole_blood$Description),]
+colon <- colon[which(colon$Hugo_Symbol %in% whole_blood$Description),]
+brca_t <- brca_t[which(brca_t$Hugo_Symbol %in% whole_blood$Description),] 
+brca_m <- brca_m[which(brca_m$Hugo_Symbol %in% whole_blood$Description),]
+breast <- breast[which(breast$Hugo_Symbol %in% whole_blood$Description),]
+whole_blood <- whole_blood[which(whole_blood$Description %in% coad_t$Hugo_Symbol),]
+whole_blood <- whole_blood[!duplicated(whole_blood$Description),] #removing alt transcripts
+
+coad_t_genes <- coad_t[,1:2]
+coad_m_genes <- coad_m[,1:2]
+colon_genes <- colon[,1:2]
+brca_t_genes <- brca_t[,1:2]
+brca_m_genes <- brca_m[,1:2]
+breast_genes <- breast[,1:2]
+wb_genes <- whole_blood[,2:3]
+
+all.equal(wb_genes$Description, coad_t_genes$Hugo_Symbol)
+all.equal(wb_genes$Description, breast_genes$Hugo_Symbol)
+
+```
+
+
+# Convert to matrix & merge
+
+```{r}
+
+coad_t_counts <- coad_t[,3:ncol(coad_t)] %>% as.matrix()
+coad_m_counts <- coad_m[,3:ncol(coad_m)] %>% as.matrix()
+colon_counts <- colon[,3:ncol(colon)] %>% as.matrix()
+brca_t_counts <- brca_t[,3:ncol(brca_t)] %>% as.matrix()
+brca_m_counts <- brca_m[,3:ncol(brca_m)] %>% as.matrix()
+breast_counts <- breast[,3:ncol(breast)] %>% as.matrix()
+wb_counts <- whole_blood[,4:ncol(whole_blood)] %>% as.matrix()
+
+rownames(coad_m_counts) <- coad_m$Hugo_Symbol
+rownames(coad_t_counts) <- coad_t$Hugo_Symbol
+rownames(colon_counts) <- colon$Hugo_Symbol
+rownames(brca_m_counts) <- brca_m$Hugo_Symbol
+rownames(brca_t_counts) <- brca_t$Hugo_Symbol
+rownames(breast_counts) <- breast$Hugo_Symbol
+rownames(wb_counts) <- whole_blood$Description
+counts <- cbind(coad_t_counts, coad_m_counts,
+                colon_counts, brca_t_counts, brca_m_counts,
+                breast_counts, wb_counts)
+```
+
+# Find genes with low expression in all tissues
+
+Right now, I a taking a random sample of genes with less than 10 counts in all samples to use for further analysis
+However, maybe it would be better to check the genes have high expression in a different tissue to ensure we are not analysing genes that 
+```{r}
+low_exp <- counts[rowMeans(counts) < 10,] %>% rownames() %>% sample(size = 300)
+write_lines(low_exp, paste0(output, "/low_in_coad_blood_and_brca.txt"))
+```
+
+
+## Set up design to find differentially expressed genes
+```{r}
+
+snames <- colnames(counts)
+
+group <- c(rep("coad_sample", ncol(coad_t_counts)),
+           rep("adjacent_colon_tissue", ncol(coad_m_counts)),
+           rep("colon", ncol(colon_counts)),
+           rep("brca_sample", ncol(brca_t_counts)),
+           rep("adjacent_brca_tissue", ncol(brca_m_counts)),
+           rep("breast", ncol(breast_counts)),
+           rep("whole_blood", ncol(wb_counts)))
+
+mm <- model.matrix(~0+group)
+
+mm
+```
+
+
+
+
+
+Should change to filter out genes with low expression in all groups.
+
+```{r}
+## Test for differential expression
+#not filtering at the moment
+
+filt_test <- filterByExpr(counts, group = group)
+filt_test
+
+dge <- DGEList(counts=counts, genes = rownames(counts))
+v <- voom(dge, mm, plot = TRUE) #converts reads for linear modelling
+fit <- lmFit(v, mm)
+
+contrast.mm <- makeContrasts(coad_vs_adj_colon = groupcoad_sample-groupadjacent_colon_tissue,
+                             coad_vs_whole_blood = groupcoad_sample-groupwhole_blood,
+                             coad_vs_gtex_colon = groupcoad_sample-groupcolon, levels=mm,
+                             brca_vs_adj_breast = groupbrca_sample-groupadjacent_brca_tissue,
+                             brca_vs_whole_blood = groupbrca_sample-groupwhole_blood,
+                             brca_vs_gtex_breast = groupbrca_sample-groupbreast,
+                             brca_vs_coad = groupbrca_sample-groupcoad_sample)
+
+#could add for blood enriched
+#blood_vs_gtex_colon = groupwhole_blood-groupcolon,
+#blood_vs_gtex_breast = groupwhole_blood-groupbreast)
+
+fit2 <- contrasts.fit(fit, contrast.mm)
+fit3 <- eBayes(fit2)
+
+
+
+
+
+```
+
+Results:
+```{r}
+coad_vs_colon <- topTable(fit3, number = Inf, coef = "coad_vs_adj_colon")
+coad_vs_colon %>% arrange(desc(logFC))
+coad_vs_blood <- topTable(fit3, number = Inf, coef = "coad_vs_whole_blood")
+coad_vs_blood %>% arrange(desc(logFC))
+brca_vs_breast <- topTable(fit3, number = Inf, coef = "brca_vs_adj_breast")
+brca_vs_breast %>% arrange(desc(logFC))
+brca_vs_blood <- topTable(fit3, number = Inf, coef = "brca_vs_whole_blood")
+brca_vs_blood %>% arrange(desc(logFC))
+brca_vs_coad <- topTable(fit3, number = Inf, coef = "brca_vs_coad")
+
+
+
+```
+
+
+
+```{r}
+#high brca
+a <- brca_vs_coad[brca_vs_coad$logFC > 1 & brca_vs_coad$adj.P.Val < 0.05,]
+b <- brca_vs_blood[brca_vs_blood$logFC > 1 & brca_vs_blood$adj.P.Val < 0.05,]
+c <- brca_vs_breast[brca_vs_breast$logFC > 1 & brca_vs_breast$adj.P.Val < 0.05,]
+high_brca <- a$genes[a$genes %in% b$genes]
+high_brca <- high_brca[high_brca %in% c$genes]
+top_high_brca <- b[b$genes %in% high_brca,] %>% arrange(desc(logFC)) %>% head(300)
+write_lines(top_high_brca$genes, paste0(output, "/top300_high_brca.txt"))
+
+
+#high coad
+a <- coad_vs_colon[coad_vs_colon$logFC > 1 & coad_vs_colon$adj.P.Val < 0.05,]
+b <- coad_vs_blood[coad_vs_blood$logFC > 1 & coad_vs_blood$adj.P.Val < 0.05,]
+c <- brca_vs_coad[brca_vs_coad$logFC < -1 & brca_vs_coad$adj.P.Val < 0.05,]
+high_coad <- a$genes[a$genes %in% b$genes]
+high_coad <- high_coad[high_coad %in% c$genes]
+top_high_coad <- b[b$genes %in% high_coad,] %>% arrange(desc(logFC)) %>% head(300)
+write_lines(top_high_coad$genes, paste0(output, "/top300_high_coad.txt"))
+
+top_just_coad <- b %>% arrange(desc(logFC)) %>% head(300)
+write_lines(top_just_coad$genes, paste0(output, "/top300_just_coad_vs_blood.txt"))
+
+#high whole blood
+a <- brca_vs_blood[brca_vs_blood$logFC < -1 & brca_vs_blood$adj.P.Val < 0.05,]
+b <- coad_vs_blood[coad_vs_blood$logFC < -1 & coad_vs_blood$adj.P.Val < 0.05,]
+high_blood <- a$genes[a$genes %in% b$genes]
+top_high_blood <- b[b$genes %in% high_blood,] %>% arrange(logFC) %>% head(300)
+write_lines(top_high_brca$genes, paste0(output, "/top300_high_blood.txt"))
+
+
+cat(rownames(top_high_blood))
+cat(rownames(top_high_coad))
+cat(rownames(top_high_brca))
+cat(low_exp)
+```
