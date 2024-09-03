@@ -2,7 +2,7 @@
 
 This repository contains three key scripts designed for genomic analysis, focusing on the investigation of DNA fragment profiles and RNA-seq data. Each script targets a specific aspect of the research, from generating fragment profiles to analysing RNA-seq expression data and comparing fragment coverage across genomic features. Below is a brief description of each script:
 
-## 1. 01_Create_Fragmentation_Profiles.Rmd
+## 1. Create_Fragmentation_Profiles.Rmd
 This script generates DNA fragmentation profiles for each sample. It uses BAM files to calculate the number of short (100-150 bp) and long (151-220 bp) DNA fragments within 5 Mbp genomic bins. The script outputs fragment profiles for individual samples and groups them by cancer status (e.g., CRC, BRCA, healthy).
 
 ### Key Features:
